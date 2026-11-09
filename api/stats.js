@@ -10,10 +10,10 @@ export default route(["GET"], async (req, res) => {
     ["GET", "stats:credits"],
     ["GET", "stats:shares"],
     ["ZREVRANGE", "leaderboard", 0, 9, "WITHSCORES"],
-    ["SCARD", "waitlist"],
-    ...RECIPES.map((r) => ["SCARD", `recipe:${r.id}`]),
+    ["GET", "stats:runs"],
+    ...RECIPES.map((r) => ["GET", `stats:runs:${r.id}`]),
   ]);
-  const [miners, credits, shares, top, waitlist, ...recipeCounts] = results;
+  const [miners, credits, shares, top, runs, ...recipeRuns] = results;
 
   const leaderboard = [];
   for (let i = 0; i < (top || []).length; i += 2) {
@@ -25,8 +25,8 @@ export default route(["GET"], async (req, res) => {
     miners: Number(miners || 0),
     credits: roundCredits(credits),
     shares: Number(shares || 0),
-    waitlist: Number(waitlist || 0),
+    runs: Number(runs || 0),
     leaderboard,
-    recipes: RECIPES.map((r, i) => ({ ...r, votes: Number(recipeCounts[i] || 0) })),
+    recipes: RECIPES.map((r, i) => ({ ...r, runs: Number(recipeRuns[i] || 0) })),
   });
 });
