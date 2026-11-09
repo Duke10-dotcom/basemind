@@ -32,7 +32,7 @@
     <section class="hero">
       <p class="eyebrow"><span class="dot"></span> Live on Base</p>
       <h1>Your browser mines.<br /><span class="accent">Your AI learns.</span></h1>
-      <p class="lede">Keep a tab open to mine credits with spare computing power. Spend them to train your own small AI model, no code and no GPU needed.</p>
+      <p class="lede">Keep a tab open to mine credits with spare computing power. Spend them to train your own small AI model right here, on your own GPU. No code needed.</p>
       <div class="stats" id="stats">
         <div><b id="s-miners">–</b><span>wallets mining</span></div>
         <div><b id="s-credits">–</b><span>credits mined</span></div>
@@ -84,10 +84,33 @@
     <section id="train" class="panel">
       <div class="panel-head">
         <h2>Train a model</h2>
-        <span class="pill pill-soon">Opening soon</span>
+        <span class="pill on">Live</span>
       </div>
-      <p class="sub">Pick a recipe, spend credits, and a GPU node fine-tunes a small model for you. Vote for the recipe you want first; voters get early access. <span id="waitlist-count"></span></p>
+      <p class="sub">Pick a recipe and spend your mined credits. A small neural network then trains right here on your own GPU (WebGPU), and you chat with it when it's done. Your models are saved in this browser. <span id="runs-count"></span></p>
       <div id="recipes" class="recipes"></div>
+
+      <div id="lab" class="lab" hidden>
+        <div class="lab-head">
+          <h3 id="lab-title">Training</h3>
+          <span id="lab-state" class="pill">Preparing…</span>
+        </div>
+        <div class="lab-stats">
+          <div><b id="lab-steps">0</b><span>steps</span></div>
+          <div><b id="lab-loss">–</b><span>loss</span></div>
+          <div><b id="lab-time">0.0 s</b><span>GPU time</span></div>
+          <div><b id="lab-params">–</b><span>parameters</span></div>
+        </div>
+        <div class="lab-bar"><i id="lab-bar"></i></div>
+        <canvas id="lab-chart" height="70" aria-hidden="true"></canvas>
+        <div id="chat" class="chat" hidden>
+          <ol id="chat-log" class="chat-log"></ol>
+          <form id="chat-form" class="chat-form">
+            <input id="chat-input" type="text" placeholder="Ask your model something…" autocomplete="off" maxlength="200" />
+            <button class="btn btn-primary" type="submit">Send</button>
+          </form>
+          <p class="hint">A tiny model (a few hundred thousand parameters) trained in your browser. It answers in its recipe's voice; questions far from what it learned get playful guesses.</p>
+        </div>
+      </div>
     </section>
 
     <section id="leaders" class="panel">
@@ -102,7 +125,7 @@
       <div class="steps">
         <div><b>1</b><h3>Connect</h3><p>Sign in with any Base wallet. A free signature proves it's you.</p></div>
         <div><b>2</b><h3>Mine</h3><p>Your GPU (via WebGPU) or CPU solves SHA-256 puzzles. Credits scale with the work you do.</p></div>
-        <div><b>3</b><h3>Train</h3><p>Spend credits on a recipe and chat with the model you trained.</p></div>
+        <div><b>3</b><h3>Train</h3><p>Spend credits on a recipe. A small model trains on your own GPU, then you chat with it.</p></div>
       </div>
     </section>
   </main>

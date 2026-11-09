@@ -113,6 +113,28 @@ h1 { font-size: clamp(38px, 7vw, 68px); line-height: 1.02; margin: 12px 0 18px; 
 .recipe-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .recipe-foot span { font: 12px var(--mono); color: var(--muted); }
 
+.recipe-foot .btn:disabled { opacity: 0.45; }
+.btn-confirm { background: var(--warn); border-color: var(--warn); color: #1a1200; }
+.lab { margin-top: 16px; background: var(--bg-2); border: 1px solid rgba(0, 82, 255, 0.5); border-radius: 12px; padding: 18px; }
+.lab-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.lab-head h3 { margin: 0; }
+.lab-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.lab-stats div { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.lab-stats b { display: block; font: 600 20px var(--mono); }
+.lab-stats span { font-size: 12px; color: var(--muted); }
+.lab-bar { height: 6px; background: var(--panel); border-radius: 99px; margin: 14px 0 10px; overflow: hidden; }
+.lab-bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--blue-2), var(--cyan)); transition: width 0.2s; }
+#lab-chart { width: 100%; height: 70px; display: block; }
+.chat { margin-top: 14px; }
+.chat-log { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow: auto; }
+.chat-log li { max-width: 85%; padding: 9px 13px; border-radius: 14px; font-size: 15px; }
+.chat-log li.me { align-self: flex-end; background: var(--blue); color: #fff; border-bottom-right-radius: 4px; }
+.chat-log li.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.chat-log li.bot.typing { color: var(--muted); font-style: italic; }
+.chat-form { display: flex; gap: 8px; }
+.chat-form input { flex: 1; min-width: 0; font: 15px var(--sans); color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 10px 16px; }
+.chat-form input:focus { outline: none; border-color: var(--blue-2); }
+
 .leaderboard { list-style: none; margin: 0; padding: 0; counter-reset: rank; }
 .leaderboard li { display: flex; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 14px; counter-increment: rank; }
 .leaderboard li::before { content: counter(rank); width: 32px; color: var(--muted); }
@@ -136,6 +158,7 @@ footer { max-width: 980px; margin: 0 auto; padding: 20px clamp(16px, 4vw, 40px) 
   .top { justify-content: space-between; }
   .meters { grid-template-columns: repeat(2, 1fr); }
   .recipes, .steps { grid-template-columns: 1fr; }
+  .lab-stats { grid-template-columns: repeat(2, 1fr); }
   .hero { padding-top: 40px; }
   #connect { padding: 8px 14px; font-size: 14px; }
 }

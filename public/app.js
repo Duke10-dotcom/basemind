@@ -92,13 +92,13 @@ async function connect() {
 function signOut() {
   miner.stop();
   saveSession(null);
-  me = { credits: 0, shares: 0, rank: null, votes: [] };
+  me = { credits: 0, shares: 0, rank: null, votes: [], runs: [] };
   renderMe();
   render();
 }
 
 // ---------- account ----------
-let me = { credits: 0, shares: 0, rank: null, votes: [] };
+let me = { credits: 0, shares: 0, rank: null, votes: [], runs: [] };
 
 async function refreshMe() {
   if (!session) return;
@@ -106,6 +106,7 @@ async function refreshMe() {
   if (r.status === 401) return signOut();
   if (r.ok) me = r.data;
   renderMe();
+  renderRecipes();
 }
 
 function renderMe() {
@@ -403,7 +404,7 @@ async function refreshStats() {
   $("s-miners").textContent = fmt(stats.miners);
   $("s-credits").textContent = fmtC(stats.credits);
   $("s-shares").textContent = fmt(stats.shares);
-  $("waitlist-count").textContent = stats.waitlist ? `${fmt(stats.waitlist)} on the waitlist.` : "";
+  $("runs-count").textContent = stats.runs ? `${fmt(stats.runs)} model${stats.runs === 1 ? "" : "s"} trained so far.` : "";
   renderLeaderboard();
   renderRecipes();
 }
@@ -425,37 +426,199 @@ function renderLeaderboard() {
   }
 }
 
+// ---------- training ----------
+let trainer = null; // loaded on first use
+const getTrainer = async () => (trainer ||= await import("/trainer.js"));
+const owner = () => session?.address || "guest";
+const ownsRun = (id) => (me.runs || []).some((r) => r.recipe === id);
+const savedLocally = (id) => {
+  try { return !!localStorage.getItem(`basemind-${owner()}-${id}`); } catch { return false; }
+};
+let busy = false;
+let confirmTimer = null;
+let active = null; // { recipe, model, info }
+
 function renderRecipes() {
   if (!stats) return;
   const wrap = $("recipes");
   wrap.innerHTML = "";
   for (const r of stats.recipes) {
-    const voted = me.votes?.includes(r.id);
     const card = document.createElement("div");
     card.className = "recipe";
-    card.innerHTML = `<h3></h3><p></p><div class="recipe-foot"><span>${fmt(r.cost)} credits · ${fmt(r.votes)} votes</span><button class="btn btn-small"></button></div>`;
+    card.innerHTML = `<h3></h3><p></p><div class="recipe-foot"><span>${fmt(r.cost)} credits · ${fmt(r.runs || 0)} trained</span><button class="btn btn-small"></button></div>`;
     card.querySelector("h3").textContent = r.name;
     card.querySelector("p").textContent = r.blurb;
     const b = card.querySelector("button");
-    b.textContent = voted ? "Voted ✓" : "Vote + join waitlist";
-    if (voted) b.classList.add("btn-done");
-    b.disabled = voted;
-    b.onclick = () => vote(r.id);
+    b.dataset.recipe = r.id;
+    if (!session) {
+      b.textContent = "Connect to train";
+      b.onclick = connect;
+    } else if (savedLocally(r.id)) {
+      b.textContent = "Chat";
+      b.className = "btn btn-small btn-done";
+      b.onclick = () => openChat(r);
+    } else if (ownsRun(r.id)) {
+      b.textContent = "Train (already paid)";
+      b.onclick = () => runTraining(r, false);
+    } else if (Number(me.credits || 0) >= r.cost) {
+      b.textContent = `Train · ${fmt(r.cost)} credits`;
+      b.className = "btn btn-small btn-primary";
+      b.onclick = () => askToTrain(b, r);
+    } else {
+      b.textContent = `Need ${fmt(r.cost)} credits`;
+      b.disabled = true;
+      b.title = `You have ${fmtC(me.credits)} credits. Keep mining!`;
+    }
+    if (busy) b.disabled = true;
     wrap.append(card);
   }
 }
 
-async function vote(recipe) {
-  if (!session) {
-    toast("Connect your wallet to vote");
-    return connect();
+// Two-step confirm so credits are never spent by accident.
+function askToTrain(btn, r) {
+  if (btn.classList.contains("btn-confirm")) {
+    clearTimeout(confirmTimer);
+    return runTraining(r, true);
   }
-  const r = await api("/api/waitlist", { method: "POST", body: { recipe } });
-  if (r.status === 401) return signOut();
-  if (!r.ok) return toast(r.data.error || "Could not save vote");
-  me.votes = [...(me.votes || []), recipe];
-  toast("You're on the waitlist");
-  refreshStats();
+  btn.classList.add("btn-confirm");
+  btn.textContent = `Confirm: spend ${fmt(r.cost)} credits`;
+  confirmTimer = setTimeout(renderRecipes, 4000);
+}
+
+async function runTraining(r, pay) {
+  if (busy) return;
+  busy = true;
+  renderRecipes();
+  try {
+    if (pay) {
+      const res = await api("/api/train", { method: "POST", body: { recipe: r.id } });
+      if (res.status === 401) return signOut();
+      if (!res.ok) throw new Error(res.data.error || "Could not start training");
+      me.credits = res.data.credits;
+      me.runs = [res.data.run, ...(me.runs || [])];
+      renderMe();
+      toast(`Spent ${fmt(r.cost)} credits. Training ${r.name}…`);
+    }
+    if (miner.running) {
+      miner.stop();
+      log("Mining paused so your GPU can train the model");
+    }
+    openLab(r);
+    setLab("Loading AI library…");
+    const T = await getTrainer();
+    setLab("Training on your GPU", true);
+    const losses = [];
+    const target = Math.log(0.08); // training stops around this loss
+    const { model, info } = await T.train(r.id, owner(), (p) => {
+      losses.push(p.loss);
+      const start = Math.log(losses[0]);
+      const pct = Math.max(0, Math.min(1, (start - Math.log(p.loss)) / (start - target)));
+      $("lab-steps").textContent = fmt(p.step);
+      $("lab-loss").textContent = p.loss.toFixed(3);
+      $("lab-time").textContent = `${p.seconds.toFixed(1)} s`;
+      $("lab-bar").style.width = `${(pct * 100).toFixed(1)}%`;
+      drawLoss(losses);
+    });
+    $("lab-bar").style.width = "100%";
+    $("lab-params").textContent = fmt(info.params);
+    setLab(`Trained · ${info.backend === "webgpu" ? "GPU" : info.backend}`, true);
+    active = { recipe: r, model, info };
+    showChat(r, info);
+    refreshStats();
+  } catch (err) {
+    setLab("Failed");
+    toast(err.message || "Training failed");
+  } finally {
+    busy = false;
+    renderRecipes();
+  }
+}
+
+async function openChat(r) {
+  if (busy) return;
+  openLab(r);
+  setLab("Loading your model…");
+  const T = await getTrainer();
+  const loaded = await T.load(r.id, owner());
+  if (!loaded) {
+    setLab("Not found in this browser");
+    toast("Model not found in this browser. Train it again.");
+    try { localStorage.removeItem(`basemind-${owner()}-${r.id}`); } catch {}
+    return renderRecipes();
+  }
+  active = { recipe: r, ...loaded };
+  $("lab-steps").textContent = fmt(loaded.info.steps);
+  $("lab-loss").textContent = loaded.info.loss.toFixed(3);
+  $("lab-time").textContent = `${loaded.info.seconds.toFixed(1)} s`;
+  $("lab-params").textContent = fmt(loaded.info.params);
+  $("lab-bar").style.width = "100%";
+  drawLoss([]);
+  setLab("Ready", true);
+  showChat(r, loaded.info);
+}
+
+function openLab(r) {
+  $("lab").hidden = false;
+  $("lab-title").textContent = r.name;
+  $("chat").hidden = true;
+  $("chat-log").innerHTML = "";
+  for (const id of ["lab-steps", "lab-loss", "lab-time", "lab-params"]) $(id).textContent = id === "lab-steps" ? "0" : "–";
+  $("lab-bar").style.width = "0";
+  drawLoss([]);
+  $("lab").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function setLab(text, on = false) {
+  $("lab-state").textContent = text;
+  $("lab-state").classList.toggle("on", on);
+}
+
+function showChat(r, info) {
+  $("chat").hidden = false;
+  addMsg("bot", `${r.name} is ready: ${fmt(info.steps)} training steps on your ${info.backend === "webgpu" ? "GPU" : "device"} in ${info.seconds.toFixed(1)} s. Ask me something!`);
+  $("chat-input").focus();
+}
+
+function addMsg(who, text) {
+  const li = document.createElement("li");
+  li.className = who;
+  li.textContent = text;
+  $("chat-log").append(li);
+  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+  return li;
+}
+
+$("chat-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const q = $("chat-input").value.trim();
+  if (!q || !active) return;
+  $("chat-input").value = "";
+  addMsg("me", q);
+  const typing = addMsg("bot typing", "thinking…");
+  const answer = await trainer.reply(active, q);
+  typing.className = "bot";
+  typing.textContent = answer;
+};
+
+function drawLoss(losses) {
+  const c = $("lab-chart");
+  const ctx = c.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (losses.length < 2) return;
+  const max = Math.max(...losses);
+  ctx.strokeStyle = "#5ce1e6";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  losses.forEach((l, i) => {
+    const x = (i / (losses.length - 1)) * w;
+    const y = h - 4 - (l / max) * (h - 8);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
 }
 
 // ---------- wiring ----------
