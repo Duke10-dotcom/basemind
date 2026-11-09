@@ -8,8 +8,10 @@ struct Params {
   w: array<vec4<u32>, 4>,   // the 16 message words, with the low-digit bytes left as zero
   startLow: u32,
   iters: u32,
-  mask: u32,
+  mask: u32,               // zero-bit mask for hash word 0
   limit: u32,               // stop before this low value (keeps 8 digits)
+  mask1: u32,               // zero-bit mask for hash word 1 (difficulty > 32)
+  pad0: u32, pad1: u32, pad2: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -30,7 +32,7 @@ fn rotr(x: u32, n: u32) -> u32 { return (x >> n) | (x << (32u - n)); }
 
 fn digit(v: u32, div: u32) -> u32 { return (v / div) % 10u + 48u; }
 
-fn firstWord(low: u32) -> u32 {
+fn hash2(low: u32) -> vec2<u32> {
   var W: array<u32, 64>;
   for (var i = 0u; i < 16u; i++) { W[i] = P.w[i / 4u][i % 4u]; }
   // bytes 41..48 hold the 8 low digits (most significant first)
@@ -54,7 +56,7 @@ fn firstWord(low: u32) -> u32 {
     h = g; g = f; f = e; e = d + t1;
     d = c; c = b; b = a; a = t1 + t2;
   }
-  return 0x6a09e667u + a;
+  return vec2<u32>(0x6a09e667u + a, 0xbb67ae85u + b);
 }
 
 @compute @workgroup_size(64)
@@ -63,7 +65,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var k = 0u; k < P.iters; k++) {
     let low = base + k;
     if (low >= P.limit) { return; }
-    if ((firstWord(low) & P.mask) == 0u) {
+    let hw = hash2(low);
+    if ((hw.x & P.mask) == 0u && (hw.y & P.mask1) == 0u) {
       atomicMin(&result[1], low);
       atomicStore(&result[0], 1u);
     }
@@ -71,14 +74,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-const WORKGROUPS = 4096;
+const WORKGROUPS = 8192;
 const THREADS = WORKGROUPS * 64;
 const LOW_MAX = 100000000; // 8 decimal digits
+const TARGET_MS = 250;     // long passes keep the GPU fully busy
 
-let device, pipeline, paramBuf, resultBuf, readBuf, bindGroup;
+let device, pipeline;
+let slots = [];            // two passes in flight at once, so the GPU never waits on us
 let job = null;
 let runToken = 0;
-let iters = 4; // adapted so each GPU pass takes ~120 ms
+let iters = 8;
+let running = Promise.resolve();
 
 async function init() {
   if (!self.navigator?.gpu) throw new Error("WebGPU not supported in this browser");
@@ -91,18 +97,20 @@ async function init() {
   const errs = info?.messages?.filter((m) => m.type === "error") || [];
   if (errs.length) throw new Error("Shader error: " + errs[0].message);
   pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "main" } });
-  paramBuf = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  resultBuf = device.createBuffer({ size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-  readBuf = device.createBuffer({ size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: paramBuf } },
-      { binding: 1, resource: { buffer: resultBuf } },
-    ],
+  slots = [0, 1].map(() => {
+    const param = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const result = device.createBuffer({ size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const read = device.createBuffer({ size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const bind = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: param } },
+        { binding: 1, resource: { buffer: result } },
+      ],
+    });
+    return { param, result, read, bind, promise: null };
   });
-  const name = adapter.info?.description || adapter.info?.vendor || "GPU";
-  return name;
+  return adapter.info?.description || adapter.info?.vendor || "GPU";
 }
 
 // Message = seed(32 hex) ":" high(8 digits) low(8 digits) → 49 bytes, one SHA-256 block.
@@ -120,9 +128,8 @@ function messageWords(seed, high) {
   return w;
 }
 
-async function sha256Hex(text) {
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return new Uint8Array(d);
+async function sha256(text) {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
 }
 
 function zeroBits(bytes) {
@@ -134,70 +141,89 @@ function zeroBits(bytes) {
   return bits;
 }
 
-async function pass(words, startLow, mask) {
-  const params = new Uint32Array(20);
-  params.set(words, 0);
-  params[16] = startLow;
-  params[17] = iters;
-  params[18] = mask;
+function masks(difficulty) {
+  const m0 = difficulty >= 32 ? 0xffffffff : ~(0xffffffff >>> difficulty) >>> 0;
+  const m1 = difficulty > 32 ? ~(0xffffffff >>> (difficulty - 32)) >>> 0 : 0;
+  return [m0, m1];
+}
+
+function submit(slot, range, m0, m1) {
+  const params = new Uint32Array(24);
+  params.set(range.words, 0);
+  params[16] = range.low;
+  params[17] = range.iters;
+  params[18] = m0;
   params[19] = LOW_MAX;
-  device.queue.writeBuffer(paramBuf, 0, params);
-  device.queue.writeBuffer(resultBuf, 0, new Uint32Array([0, 0xffffffff]));
+  params[20] = m1;
+  device.queue.writeBuffer(slot.param, 0, params);
+  device.queue.writeBuffer(slot.result, 0, new Uint32Array([0, 0xffffffff]));
   const enc = device.createCommandEncoder();
   const cp = enc.beginComputePass();
   cp.setPipeline(pipeline);
-  cp.setBindGroup(0, bindGroup);
+  cp.setBindGroup(0, slot.bind);
   cp.dispatchWorkgroups(WORKGROUPS);
   cp.end();
-  enc.copyBufferToBuffer(resultBuf, 0, readBuf, 0, 8);
+  enc.copyBufferToBuffer(slot.result, 0, slot.read, 0, 8);
   device.queue.submit([enc.finish()]);
-  await readBuf.mapAsync(GPUMapMode.READ);
-  const out = new Uint32Array(readBuf.getMappedRange().slice(0));
-  readBuf.unmap();
-  return out[0] ? out[1] : null;
+  slot.range = range;
+  slot.promise = slot.read.mapAsync(GPUMapMode.READ).then(() => {
+    const out = new Uint32Array(slot.read.getMappedRange().slice(0));
+    slot.read.unmap();
+    return out[0] ? out[1] : null;
+  });
 }
 
 async function run(token) {
   const { id, seed, difficulty } = job;
-  const mask = difficulty >= 32 ? 0xffffffff : ~(0xffffffff >>> difficulty) >>> 0;
+  const [m0, m1] = job.masks || masks(difficulty); // masks override is used by tests only
   let high = 10000000 + Math.floor(Math.random() * 89999999);
-  let low = 0;
   let words = messageWords(seed, high);
+  let low = 0;
 
-  while (job && token === runToken) {
-    const span = THREADS * iters;
-    const t0 = performance.now();
-    const found = await pass(words, low, mask);
-    const ms = performance.now() - t0;
-    if (!job || token !== runToken) return;
-
-    const done = Math.min(span, LOW_MAX - low);
-    postMessage({ type: "progress", hashes: done });
-
-    if (found !== null) {
-      const nonce = `${high}${String(found).padStart(8, "0")}`;
-      // Double-check on the CPU so a GPU driver bug can never send bad shares.
-      const hash = await sha256Hex(`${seed}:${nonce}`);
-      if (zeroBits(hash) >= difficulty) {
-        postMessage({ type: "found", id, nonce, hashes: 0 });
-        job = null;
-        return;
-      }
-      postMessage({ type: "error", error: "GPU result failed verification" });
-      job = null;
-      return;
-    }
-
-    // Tune work per pass to ~120 ms so the page stays responsive.
-    if (ms < 60 && iters < 512) iters *= 2;
-    else if (ms > 250 && iters > 1) iters = Math.max(1, Math.floor(iters / 2));
-
-    low += span;
+  const nextRange = () => {
     if (low >= LOW_MAX) {
       high = 10000000 + Math.floor(Math.random() * 89999999);
       words = messageWords(seed, high);
       low = 0;
     }
+    const r = { high, words, low, iters, count: Math.min(THREADS * iters, LOW_MAX - low) };
+    low += THREADS * iters;
+    return r;
+  };
+
+  submit(slots[0], nextRange(), m0, m1);
+  submit(slots[1], nextRange(), m0, m1);
+  let last = performance.now();
+  let i = 0;
+
+  while (true) {
+    const slot = slots[i % 2];
+    const found = await slot.promise;
+    if (!job || token !== runToken) return;
+    const now = performance.now();
+    const ms = now - last;
+    last = now;
+    postMessage({ type: "progress", hashes: slot.range.count });
+
+    if (found !== null) {
+      const nonce = `${slot.range.high}${String(found).padStart(8, "0")}`;
+      // Double-check on the CPU so a GPU driver bug can never send bad shares.
+      if (zeroBits(await sha256(`${seed}:${nonce}`)) >= difficulty) {
+        postMessage({ type: "found", id, nonce, hashes: 0 });
+      } else {
+        postMessage({ type: "error", error: "GPU result failed verification" });
+      }
+      job = null;
+      await slots[(i + 1) % 2].promise.catch(() => {});
+      return;
+    }
+
+    // Each pass should take ~250 ms: long enough to keep the GPU saturated.
+    if (ms < TARGET_MS / 2 && iters < 8192) iters *= 2;
+    else if (ms > TARGET_MS * 2 && iters > 1) iters = Math.max(1, Math.floor(iters / 2));
+
+    submit(slot, nextRange(), m0, m1);
+    i++;
   }
 }
 
@@ -211,9 +237,12 @@ self.onmessage = async (e) => {
       postMessage({ type: "unavailable", error: String(err.message || err) });
     }
   } else if (msg.type === "job") {
-    job = { id: msg.id, seed: msg.seed, difficulty: msg.difficulty };
     const token = ++runToken;
-    run(token).catch((err) => postMessage({ type: "error", error: String(err.message || err) }));
+    // Let any passes from the previous puzzle drain before reusing the buffers.
+    await Promise.allSettled(slots.map((s) => s.promise));
+    if (token !== runToken) return;
+    job = { id: msg.id, seed: msg.seed, difficulty: msg.difficulty, masks: msg.masks };
+    running = run(token).catch((err) => postMessage({ type: "error", error: String(err.message || err) }));
   } else if (msg.type === "stop") {
     job = null;
     runToken++;

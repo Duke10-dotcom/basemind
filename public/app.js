@@ -3,6 +3,12 @@
 const $ = (id) => document.getElementById(id);
 const BASE = { chainId: "0x2105", chainName: "Base", rpcUrls: ["https://mainnet.base.org"], nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://basescan.org"] };
 const fmt = (n) => Number(n || 0).toLocaleString("en-US");
+// Credits are fractional (like a real coin): show more decimals for small amounts.
+const fmtC = (n) => {
+  n = Number(n || 0);
+  const d = n === 0 ? 0 : n >= 100 ? 2 : n >= 1 ? 4 : n >= 0.01 ? 6 : 8;
+  return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+};
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 // ---------- session ----------
@@ -103,7 +109,7 @@ async function refreshMe() {
 }
 
 function renderMe() {
-  $("m-credits").textContent = fmt(me.credits);
+  $("m-credits").textContent = fmtC(me.credits);
   $("m-shares").textContent = fmt(me.shares);
   $("m-rank").textContent = me.rank ? `rank #${me.rank}` : "unranked";
 }
@@ -127,7 +133,8 @@ threadsInput.max = String(Math.max(1, cores));
 threadsInput.value = String(Math.max(1, Math.min(cores - 1, Math.floor(cores / 2)) || 1));
 $("threads-val").textContent = threadsInput.value;
 
-const MIN_D = 22, MAX_D = 32, TARGET_SECONDS = 10;
+const MIN_D = 22, TARGET_SECONDS = 15;
+const maxD = () => (device === "gpu" ? 40 : 32); // the CPU miner checks 32 bits, the GPU miner 40
 let device = "cpu";
 let gpu = { available: false, name: "" };
 
@@ -174,7 +181,7 @@ function setDevice(next) {
 function wantedDifficulty() {
   const rate = miner.rate || (device === "gpu" ? 2e6 : 1e6 * miner.workers.length);
   const d = Math.ceil(Math.log2(Math.max(1, rate * TARGET_SECONDS)));
-  return Math.max(MIN_D, Math.min(MAX_D, d));
+  return Math.max(MIN_D, Math.min(maxD(), d));
 }
 
 const miner = {
@@ -246,7 +253,10 @@ const miner = {
     if (!this.running || !ch) return;
     this.challenge = ch;
     this.startedAt = Date.now();
-    if (ch.reward) $("per-share").textContent = fmt(ch.reward);
+    if (ch.reward) {
+      $("per-share").textContent = fmtC(ch.reward);
+      this.creditsPerHash = ch.reward / 2 ** ch.difficulty;
+    }
     const step = this.workers.length;
     // Random start so two tabs on the same wallet don't repeat each other's work.
     const base = Math.floor(Math.random() * 1e9) * step;
@@ -287,7 +297,7 @@ const miner = {
       me.credits = r.data.credits;
       me.shares += 1;
       renderMe();
-      log(`Share accepted  +${fmt(r.data.earned)} credits`, "good");
+      log(`Share accepted  +${fmtC(r.data.earned)} credits`, "good");
       if (me.shares % 5 === 1) refreshStats();
     } else {
       log(r.data.error || "Share rejected", "bad");
@@ -333,7 +343,9 @@ function log(text, cls = "") {
 
 function renderMiner() {
   $("m-rate").textContent = miner.rate >= 1e6 ? `${(miner.rate / 1e6).toFixed(2)}M` : miner.rate >= 1e3 ? `${(miner.rate / 1e3).toFixed(0)}k` : String(Math.round(miner.rate));
-  $("m-session").textContent = fmt(miner.session);
+  $("m-session").textContent = fmtC(miner.session);
+  const est = miner.running && miner.creditsPerHash ? miner.rate * 3600 * miner.creditsPerHash : 0;
+  $("est").textContent = est ? `≈ ${fmtC(est)} credits/hour at this speed.` : "";
 }
 
 // Hashrate sampling once a second.
@@ -389,7 +401,7 @@ async function refreshStats() {
   if (!r?.ok) return;
   stats = r.data;
   $("s-miners").textContent = fmt(stats.miners);
-  $("s-credits").textContent = fmt(stats.credits);
+  $("s-credits").textContent = fmtC(stats.credits);
   $("s-shares").textContent = fmt(stats.shares);
   $("waitlist-count").textContent = stats.waitlist ? `${fmt(stats.waitlist)} on the waitlist.` : "";
   renderLeaderboard();
@@ -407,7 +419,7 @@ function renderLeaderboard() {
   for (const row of stats.leaderboard) {
     const li = document.createElement("li");
     if (session && row.address === session.address) li.className = "me";
-    li.innerHTML = `<span class="addr"></span><span>${fmt(row.credits)} credits</span>`;
+    li.innerHTML = `<span class="addr"></span><span>${fmtC(row.credits)} credits</span>`;
     li.querySelector(".addr").textContent = short(row.address) + (li.className ? " (you)" : "");
     list.append(li);
   }
