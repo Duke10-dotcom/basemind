@@ -127,6 +127,56 @@ threadsInput.max = String(Math.max(1, cores));
 threadsInput.value = String(Math.max(1, Math.min(cores - 1, Math.floor(cores / 2)) || 1));
 $("threads-val").textContent = threadsInput.value;
 
+const MIN_D = 22, MAX_D = 32, TARGET_SECONDS = 10;
+let device = "cpu";
+let gpu = { available: false, name: "" };
+
+// Probe for WebGPU once, in a throwaway worker.
+(function probeGpu() {
+  if (!("gpu" in navigator)) return setDeviceNote();
+  const w = new Worker("/gpu.worker.js");
+  w.onmessage = (e) => {
+    if (e.data.type === "ready") {
+      gpu = { available: true, name: e.data.name || "GPU" };
+      device = "gpu";
+    }
+    w.terminate();
+    setDeviceNote();
+  };
+  w.onerror = () => { w.terminate(); setDeviceNote(); };
+  w.postMessage({ type: "init" });
+})();
+
+function setDeviceNote() {
+  $("dev-gpu").disabled = !gpu.available;
+  $("dev-gpu").classList.toggle("on", device === "gpu");
+  $("dev-cpu").classList.toggle("on", device === "cpu");
+  $("threads-wrap").hidden = device === "gpu";
+  $("device-note").textContent =
+    device === "gpu"
+      ? `Mining on your GPU (${gpu.name}) with WebGPU.`
+      : gpu.available
+        ? "Mining on your CPU. Switch to GPU for much more speed."
+        : "No WebGPU in this browser, so mining runs on your CPU. Lower the threads if your device gets warm.";
+}
+
+function setDevice(next) {
+  if (next === device || (next === "gpu" && !gpu.available)) return;
+  device = next;
+  setDeviceNote();
+  if (miner.running) {
+    miner.rate = 0;
+    miner.spawn().then(() => miner.restart());
+  }
+}
+
+// Ask for a puzzle that takes ~10 s at the current hashrate.
+function wantedDifficulty() {
+  const rate = miner.rate || (device === "gpu" ? 2e6 : 1e6 * miner.workers.length);
+  const d = Math.ceil(Math.log2(Math.max(1, rate * TARGET_SECONDS)));
+  return Math.max(MIN_D, Math.min(MAX_D, d));
+}
+
 const miner = {
   running: false,
   workers: [],
@@ -141,17 +191,16 @@ const miner = {
     if (this.running) return;
     this.running = true;
     setState("Starting…");
-    const r = await api("/api/mine/challenge", { method: "POST" });
+    await this.spawn();
+    const r = await api("/api/mine/challenge", { method: "POST", body: { difficulty: wantedDifficulty() } });
     if (r.status === 401) return signOut();
     if (!r.ok) {
-      this.running = false;
-      setState("Idle");
+      this.stop();
       return toast(r.data.error || "Could not start mining");
     }
-    this.spawn();
     this.dispatch(r.data.challenge);
     setState("Mining", true);
-    log("Mining started");
+    log(`Mining started on ${device === "gpu" ? "GPU" : `CPU (${this.workers.length} threads)`}`);
   },
 
   stop() {
@@ -164,8 +213,27 @@ const miner = {
     renderMiner();
   },
 
-  spawn() {
+  async spawn() {
     this.workers.forEach((w) => w.terminate());
+    this.workers = [];
+    if (device === "gpu") {
+      const w = new Worker("/gpu.worker.js");
+      const ok = await new Promise((resolve) => {
+        w.onmessage = (e) => resolve(e.data.type === "ready");
+        w.onerror = () => resolve(false);
+        w.postMessage({ type: "init" });
+      });
+      if (ok) {
+        w.onmessage = (e) => this.onMessage(e.data);
+        this.workers = [w];
+        return;
+      }
+      w.terminate();
+      gpu.available = false;
+      device = "cpu";
+      setDeviceNote();
+      log("GPU unavailable, switched to CPU", "bad");
+    }
     const n = Number(threadsInput.value);
     this.workers = Array.from({ length: n }, () => {
       const w = new Worker("/miner.worker.js");
@@ -177,6 +245,7 @@ const miner = {
   dispatch(ch) {
     if (!this.running || !ch) return;
     this.challenge = ch;
+    this.startedAt = Date.now();
     if (ch.reward) $("per-share").textContent = fmt(ch.reward);
     const step = this.workers.length;
     // Random start so two tabs on the same wallet don't repeat each other's work.
@@ -186,6 +255,14 @@ const miner = {
 
   onMessage(msg) {
     if (msg.type === "progress" || msg.type === "found") this.hashes += msg.hashes;
+    if (msg.type === "error") {
+      log(`GPU problem (${msg.error}), switching to CPU`, "bad");
+      gpu.available = false;
+      device = "cpu";
+      setDeviceNote();
+      if (this.running) this.spawn().then(() => this.restart());
+      return;
+    }
     if (msg.type === "found" && this.challenge && msg.id === this.challenge.id) {
       const id = this.challenge.id;
       this.challenge = null;
@@ -197,7 +274,7 @@ const miner = {
   async submit(id, nonce) {
     let r;
     try {
-      r = await api("/api/mine/submit", { method: "POST", body: { id, nonce } });
+      r = await api("/api/mine/submit", { method: "POST", body: { id, nonce, next: wantedDifficulty() } });
     } catch {
       log("Network hiccup, retrying…", "bad");
       setTimeout(() => this.running && this.restart(), 3000);
@@ -210,7 +287,7 @@ const miner = {
       me.credits = r.data.credits;
       me.shares += 1;
       renderMe();
-      log(`Share accepted  +${r.data.earned} credits`, "good");
+      log(`Share accepted  +${fmt(r.data.earned)} credits`, "good");
       if (me.shares % 5 === 1) refreshStats();
     } else {
       log(r.data.error || "Share rejected", "bad");
@@ -230,7 +307,7 @@ const miner = {
   },
 
   async restart() {
-    const r = await api("/api/mine/challenge", { method: "POST" });
+    const r = await api("/api/mine/challenge", { method: "POST", body: { difficulty: wantedDifficulty() } });
     if (r.ok) this.dispatch(r.data.challenge);
     else setTimeout(() => this.running && this.restart(), 5000);
   },
@@ -267,6 +344,14 @@ setInterval(() => {
   miner.history.push(miner.running ? h : 0);
   if (miner.history.length > 60) miner.history.shift();
   renderMiner();
+  // If this puzzle is far too hard for the measured speed, swap it for an easier one.
+  const ch = miner.challenge;
+  if (miner.running && ch && miner.rate > 0 && Date.now() - miner.startedAt > 3 * TARGET_SECONDS * 1000 && wantedDifficulty() < ch.difficulty) {
+    miner.challenge = null;
+    miner.workers.forEach((w) => w.postMessage({ type: "stop" }));
+    log("Tuning puzzle size to your device…");
+    miner.restart();
+  }
 }, 1000);
 
 // Little live activity chart.
@@ -369,12 +454,11 @@ threadsInput.oninput = () => {
   $("threads-val").textContent = threadsInput.value;
 };
 threadsInput.onchange = () => {
-  if (!miner.running) return;
-  const ch = miner.challenge;
-  miner.spawn();
-  if (ch) miner.dispatch(ch);
-  else miner.restart();
+  if (!miner.running || device !== "cpu") return;
+  miner.spawn().then(() => miner.restart());
 };
+$("dev-gpu").onclick = () => setDevice("gpu");
+$("dev-cpu").onclick = () => setDevice("cpu");
 window.ethereum?.on?.("accountsChanged", (accounts) => {
   if (session && accounts[0]?.toLowerCase() !== session.address) signOut();
 });
