@@ -1,6 +1,6 @@
 import { redis, pipeline } from "../../lib/redis.js";
 import { route, send, body, sessionAddress } from "../../lib/http.js";
-import { isValidShare, rewardFor, MAX_SHARES_PER_MINUTE } from "../../lib/pow.js";
+import { isValidShare, rewardFor, roundCredits, MAX_SHARES_PER_MINUTE } from "../../lib/pow.js";
 import { issueChallenge } from "../../lib/challenge.js";
 
 // The miner found a solution. Check it, pay credits, and hand out the next puzzle.
@@ -35,7 +35,7 @@ export default route(["POST"], async (req, res) => {
   const earned = rewardFor(ch.difficulty);
   const [total] = await pipeline([
     ["ZINCRBY", "leaderboard", earned, addr],
-    ["INCRBY", "stats:credits", earned],
+    ["INCRBYFLOAT", "stats:credits", earned],
     ["INCR", "stats:shares"],
     ["INCR", `shares:${addr}`],
   ]);
@@ -43,7 +43,7 @@ export default route(["POST"], async (req, res) => {
   send(res, 200, {
     ok: true,
     earned,
-    credits: Math.round(Number(total)),
+    credits: roundCredits(total),
     challenge: await issueChallenge(addr, next),
   });
 });
